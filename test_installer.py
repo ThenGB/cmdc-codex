@@ -72,5 +72,26 @@ class InstallerTests(unittest.TestCase):
             finally:
                 installer.service=real_service
 
+    def test_stop_failure_restores_native_route_and_allows_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home=Path(directory)
+            installer.HOME=home;installer.ROOT=home/'runtime';installer.CODEX=home/'.codex';installer.CONFIG=installer.CODEX/'config.toml'
+            installer.CODEX.mkdir();installer.CONFIG.write_text('model = "native-model"\n')
+            auth=home/'.commandcode/auth.json';auth.parent.mkdir();auth.write_text(json.dumps({'apiKey':'test-placeholder-only'}))
+            installer.install(no_service=True)
+            journal=installer.ROOT/'install.json';data=json.loads(journal.read_text());data['no_service']=False;journal.write_text(json.dumps(data))
+            real_service=installer.service
+            def fail_stop(*_):raise RuntimeError('Stop failed')
+            installer.service=fail_stop
+            try:
+                with self.assertRaises(RuntimeError):installer.uninstall()
+                self.assertNotIn('openai_base_url',installer.CONFIG.read_text())
+                self.assertEqual(json.loads(journal.read_text())['status'],'config_restored')
+                installer.service=lambda *_:None
+                installer.uninstall()
+                self.assertTrue(auth.exists())
+                self.assertFalse(journal.exists())
+            finally:installer.service=real_service
+
 if __name__=='__main__':
     unittest.main()

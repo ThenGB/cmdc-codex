@@ -103,9 +103,8 @@ def service(install, root, node):
             code = ("$ErrorActionPreference='Stop'; $task=Get-ScheduledTask -TaskName 'cmdc-codex' -ErrorAction SilentlyContinue; "
                     "if($task){if($task.Actions.Arguments -ne " + ps_quote(arguments) + " -and $task.Actions.Arguments -ne " + ps_quote(legacy_arguments) + "){throw 'Task ownership changed'}; "
                     "Stop-ScheduledTask -TaskName 'cmdc-codex'; Unregister-ScheduledTask -TaskName 'cmdc-codex' -Confirm:$false}; "
-                    "$listeners=Get-NetTCPConnection -LocalPort 17842 -State Listen -ErrorAction SilentlyContinue; "
-                    "foreach($listener in $listeners){$owner=Get-CimInstance Win32_Process -Filter ('ProcessId='+$listener.OwningProcess); "
-                    "if($owner.CommandLine -and $owner.CommandLine.TrimEnd([char]34).EndsWith(" + ps_quote(script) + ",[StringComparison]::OrdinalIgnoreCase)){Stop-Process -Id $owner.ProcessId -Force}}")
+                    "$owners=Get-CimInstance Win32_Process -Filter \"Name='node.exe'\"; "
+                    "foreach($owner in $owners){if($owner.CommandLine -and $owner.CommandLine.TrimEnd([char]34).EndsWith(" + ps_quote(script) + ",[StringComparison]::OrdinalIgnoreCase)){Stop-Process -Id $owner.ProcessId -Force}}; exit 0")
         subprocess.run(['powershell.exe','-NoProfile','-NonInteractive','-Command',code], check=True)
     else:
         unit = HOME / '.config/systemd/user/cmdc-codex.service'
@@ -201,9 +200,11 @@ def uninstall():
         for change in reversed(journal['changes']):
             text = restore_setting(text, change)
     tomllib.loads(text)
+    write_config(text)
+    journal['status']='config_restored'
+    write_json(ROOT / 'install.json',journal)
     if not journal['no_service']:
         service(False, ROOT, journal['node'])
-    write_config(text)
     # Delete only known owned files; leave unrelated files and both original auth stores intact.
     names = journal['files'] + ['settings.json','commandcode-models.json','commandcode-models.json.tmp','requests.jsonl','service.log','config.backup.toml','install.json']
     if journal['owns_key']:
