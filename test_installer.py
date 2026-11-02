@@ -44,5 +44,33 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(installer.tomllib.loads(changed)['other']['openai_base_url'],'leave me')
         self.assertEqual(installer.restore_setting(changed,change),source)
 
+    def test_service_failure_preserves_config_and_can_be_uninstalled(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home=Path(directory)
+            installer.HOME=home
+            installer.ROOT=home/'runtime'
+            installer.CODEX=home/'.codex'
+            installer.CONFIG=installer.CODEX/'config.toml'
+            installer.CODEX.mkdir()
+            original='model = "native-model"\n'
+            installer.CONFIG.write_text(original)
+            auth=home/'.commandcode/auth.json'
+            auth.parent.mkdir()
+            auth.write_text(json.dumps({'apiKey':'test-placeholder-only'}))
+            real_service=installer.service
+            def fail_start(start,*_):
+                if start:
+                    raise RuntimeError('Service unavailable')
+            installer.service=fail_start
+            try:
+                with self.assertRaises(RuntimeError):
+                    installer.install()
+                self.assertEqual(installer.CONFIG.read_text(),original)
+                installer.uninstall()
+                self.assertEqual(installer.CONFIG.read_text(),original)
+                self.assertTrue(auth.exists())
+            finally:
+                installer.service=real_service
+
 if __name__=='__main__':
     unittest.main()
