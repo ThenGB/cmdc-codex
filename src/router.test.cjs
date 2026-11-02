@@ -4,7 +4,7 @@ const fs=require('node:fs'),os=require('node:os'),path=require('node:path'),net=
 test('cancelled Desktop websocket prewarm cannot crash the router',async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cmdc-upgrade-test-'));
  const port=await new Promise(resolve=>{const s=net.createServer();s.listen(0,'127.0.0.1',()=>{const p=s.address().port;s.close(()=>resolve(p));});});
- for(const file of ['router.cjs','catalog.cjs'])fs.copyFileSync(path.join(__dirname,file),path.join(dir,file));
+ for(const file of ['router.cjs','catalog.cjs','multimodal.cjs'])fs.copyFileSync(path.join(__dirname,file),path.join(dir,file));
  fs.writeFileSync(path.join(dir,'settings.json'),JSON.stringify({port,nativeBase:'http://127.0.0.1:1/v1'}));
  const child=cp.spawn(process.execPath,[path.join(dir,'router.cjs')]);
  let stderr='';child.stderr.on('data',d=>stderr+=d);

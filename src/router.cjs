@@ -40,6 +40,7 @@ const server = http.createServer(async (req, res) => {
       const effort = parsed.reasoning?.effort;
       if (effort && !model.supported_reasoning_levels.some(x => x.effort === effort)) return error(res,400,'Unsupported effort for this model: '+effort);
       parsed.model = parsed.model.slice('commandcode/'.length);
+      parsed.input = require('./multimodal.cjs').normalizeToolImages(parsed.input);
       body = Buffer.from(JSON.stringify(parsed));
       // Never forward Codex credentials or account headers to CommandCode.
       for (const k of [...headers.keys()]) headers.delete(k);

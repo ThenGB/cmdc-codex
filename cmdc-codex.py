@@ -86,9 +86,10 @@ def ps_quote(s):
 def service(install, root, node):
     script = root / 'router.cjs'
     if sys.platform == 'win32':
-        executable = str(Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe')
+        executable = str(node)
         invocation = '& ' + ps_quote(node) + ' ' + ps_quote(script) + ' >> ' + ps_quote(root/'service.log') + ' 2>&1'
-        arguments = '-NoProfile -NonInteractive -WindowStyle Hidden -Command "' + invocation + '"'
+        legacy_arguments = '-NoProfile -NonInteractive -WindowStyle Hidden -Command "' + invocation + '"'
+        arguments = '"' + str(script) + '"'
         # A named, user-scoped scheduled task provides explicit start/stop ownership.
         if install:
             code = ("$ErrorActionPreference='Stop'; $existing=Get-ScheduledTask -TaskName 'cmdc-codex' -ErrorAction SilentlyContinue; "
@@ -100,8 +101,11 @@ def service(install, root, node):
                     "Start-ScheduledTask -TaskName 'cmdc-codex'")
         else:
             code = ("$ErrorActionPreference='Stop'; $task=Get-ScheduledTask -TaskName 'cmdc-codex' -ErrorAction SilentlyContinue; "
-                    "if($task){if($task.Actions.Arguments -ne " + ps_quote(arguments) + "){throw 'Task ownership changed'}; "
-                    "Stop-ScheduledTask -TaskName 'cmdc-codex'; Unregister-ScheduledTask -TaskName 'cmdc-codex' -Confirm:$false}")
+                    "if($task){if($task.Actions.Arguments -ne " + ps_quote(arguments) + " -and $task.Actions.Arguments -ne " + ps_quote(legacy_arguments) + "){throw 'Task ownership changed'}; "
+                    "Stop-ScheduledTask -TaskName 'cmdc-codex'; Unregister-ScheduledTask -TaskName 'cmdc-codex' -Confirm:$false}; "
+                    "$listeners=Get-NetTCPConnection -LocalPort 17842 -State Listen -ErrorAction SilentlyContinue; "
+                    "foreach($listener in $listeners){$owner=Get-CimInstance Win32_Process -Filter ('ProcessId='+$listener.OwningProcess); "
+                    "if($owner.CommandLine -and $owner.CommandLine.TrimEnd([char]34).EndsWith(" + ps_quote(script) + ",[StringComparison]::OrdinalIgnoreCase)){Stop-Process -Id $owner.ProcessId -Force}}")
         subprocess.run(['powershell.exe','-NoProfile','-NonInteractive','-Command',code], check=True)
     else:
         unit = HOME / '.config/systemd/user/cmdc-codex.service'
@@ -146,7 +150,7 @@ def install(no_service=False):
         if sys.platform == 'win32':
             subprocess.run(['icacls', str(own_key), '/inheritance:r', '/grant:r', getpass.getuser()+':F'],check=True,stdout=subprocess.DEVNULL)
     files = []
-    for name in ['router.cjs','catalog.cjs']:
+    for name in ['router.cjs','catalog.cjs','multimodal.cjs']:
         target = ROOT / name
         if target.exists():
             raise RuntimeError('Install file already exists: ' + str(target))

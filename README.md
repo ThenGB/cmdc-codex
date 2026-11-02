@@ -60,6 +60,7 @@ Uninstall stops only the owned user service/task and restores only the two manag
 ## Limits and diagnostics
 
 - SSE responses, cancellation, client-side function/custom tools and cache usage pass through. WebSockets fall back to HTTP/SSE.
+- Multimodal tool results retain their text and images, with images sent as image messages. This avoids counting image base64 as plain text in CommandCode's tool-result conversion; no history is silently trimmed.
 - External models cannot inherit every OpenAI-hosted feature. Image input requires upstream support; hosted search, remote compaction, voice and other specialized features depend on the selected provider. Native routes remain available for native features.
 - Prompt caching is upstream-managed. Cold prompts, effort changes, different tools/prefixes and cache expiry can incur normal input cost. Check `usage.input_tokens_details.cached_tokens`; a high warm-cache hit does not guarantee every request or invoice discount.
 - The local request log contains timestamps, model, effort, stream flag and whether a cache key was supplied. It contains no prompts, keys, authorization headers or cache-key values.
