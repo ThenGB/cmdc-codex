@@ -201,7 +201,7 @@ def uninstall():
         service(False, ROOT, journal['node'])
     write_config(text)
     # Delete only known owned files; leave unrelated files and both original auth stores intact.
-    names = journal['files'] + ['settings.json','commandcode-models.json','requests.jsonl','config.backup.toml','install.json']
+    names = journal['files'] + ['settings.json','commandcode-models.json','commandcode-models.json.tmp','requests.jsonl','service.log','config.backup.toml','install.json']
     if journal['owns_key']:
         names.append('credentials.json')
     for name in names:
