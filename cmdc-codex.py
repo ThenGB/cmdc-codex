@@ -83,15 +83,39 @@ def restore_setting(text, change):
 def ps_quote(s):
     return "'" + str(s).replace("'", "''") + "'"
 
+def configure_gateway(original):
+    data = tomllib.loads(original)
+    if data.get('model_provider', 'openai') != 'openai' or data.get('model_catalog_json'):
+        raise RuntimeError('Restore native provider/catalog first; existing custom configuration is preserved')
+    if 'cmdc-codex' in data.get('model_providers', {}):
+        raise RuntimeError('Provider cmdc-codex already exists; refusing to overwrite it')
+    text, provider = edit_setting(original, '', 'model_provider', json.dumps('cmdc-codex'))
+    changes = [provider]
+    for key, value in {'name':'CommandCode + native Codex', 'base_url':'http://127.0.0.1:17842/v1',
+                       'wire_api':'responses', 'requires_openai_auth':True, 'supports_websockets':False}.items():
+        text, change = edit_setting(text, 'model_providers.cmdc-codex', key, json.dumps(value))
+        changes.append(change)
+    efforts = data.get('desktop',{}).get('enabled-reasoning-efforts',['low','medium','high','xhigh','max','ultra'])
+    text, effort = edit_setting(text, 'desktop', 'enabled-reasoning-efforts', json.dumps(list(dict.fromkeys(['none']+efforts))))
+    changes.append(effort)
+    tomllib.loads(text)
+    return text, changes
+
 def service(install, root, node):
     script = root / 'router.cjs'
     if sys.platform == 'win32':
-        executable = str(node)
+        journal_path = root / 'install.json'
+        journal = json.loads(journal_path.read_text(encoding='utf-8')) if journal_path.exists() else {}
+        pythonw = Path(journal.get('pythonw') or Path(sys.executable).with_name('pythonw.exe'))
+        executable = str(pythonw)
         invocation = '& ' + ps_quote(node) + ' ' + ps_quote(script) + ' >> ' + ps_quote(root/'service.log') + ' 2>&1'
         legacy_arguments = '-NoProfile -NonInteractive -WindowStyle Hidden -Command "' + invocation + '"'
-        arguments = '"' + str(script) + '"'
+        direct_arguments = '"' + str(script) + '"'
+        arguments = '"' + str(root / 'windows_service.py') + '" "' + str(node) + '"'
         # A named, user-scoped scheduled task provides explicit start/stop ownership.
         if install:
+            if not pythonw.is_file():
+                raise RuntimeError('pythonw.exe is required for a console-free Windows service')
             code = ("$ErrorActionPreference='Stop'; $existing=Get-ScheduledTask -TaskName 'cmdc-codex' -ErrorAction SilentlyContinue; "
                     "if($existing){throw 'Task cmdc-codex already exists'}; "
                     "$action=New-ScheduledTaskAction -Execute " + ps_quote(executable) + " -Argument " + ps_quote(arguments) + "; "
@@ -101,7 +125,7 @@ def service(install, root, node):
                     "Start-ScheduledTask -TaskName 'cmdc-codex'")
         else:
             code = ("$ErrorActionPreference='Stop'; $task=Get-ScheduledTask -TaskName 'cmdc-codex' -ErrorAction SilentlyContinue; "
-                    "if($task){if($task.Actions.Arguments -ne " + ps_quote(arguments) + " -and $task.Actions.Arguments -ne " + ps_quote(legacy_arguments) + "){throw 'Task ownership changed'}; "
+                    "if($task){if($task.Actions.Count -ne 1 -or -not ((($task.Actions.Execute -eq " + ps_quote(executable) + ") -and ($task.Actions.Arguments -eq " + ps_quote(arguments) + ")) -or (($task.Actions.Execute -eq " + ps_quote(node) + ") -and ($task.Actions.Arguments -eq " + ps_quote(direct_arguments) + ")) -or (($task.Actions.Execute -eq 'powershell.exe') -and ($task.Actions.Arguments -eq " + ps_quote(legacy_arguments) + ")))){throw 'Task ownership changed'}; "
                     "Stop-ScheduledTask -TaskName 'cmdc-codex'; Unregister-ScheduledTask -TaskName 'cmdc-codex' -Confirm:$false}; "
                     "$owners=Get-CimInstance Win32_Process -Filter \"Name='node.exe'\"; "
                     "foreach($owner in $owners){if($owner.CommandLine -and $owner.CommandLine.TrimEnd([char]34).EndsWith(" + ps_quote(script) + ",[StringComparison]::OrdinalIgnoreCase)){Stop-Process -Id $owner.ProcessId -Force}}; exit 0")
@@ -131,8 +155,7 @@ def install(no_service=False):
         raise RuntimeError('Node.js 24+ is required (zstd support)')
     original = CONFIG.read_text(encoding='utf-8-sig') if CONFIG.exists() else ''
     data = tomllib.loads(original)
-    if data.get('model_provider', 'openai') != 'openai' or data.get('model_catalog_json'):
-        raise RuntimeError('Restore native openai provider/catalog first; existing custom configuration is preserved')
+    text, changes = configure_gateway(original)
     ROOT.mkdir(parents=True, exist_ok=True)
     if ROOT.is_symlink():
         raise RuntimeError('Install directory must not be a symlink')
@@ -155,14 +178,17 @@ def install(no_service=False):
             raise RuntimeError('Install file already exists: ' + str(target))
         shutil.copyfile(BASE / 'src' / name, target)
         files.append(name)
+    if sys.platform == 'win32':
+        if (ROOT / 'windows_service.py').exists():
+            raise RuntimeError('Install file already exists: ' + str(ROOT / 'windows_service.py'))
+        shutil.copyfile(BASE / 'windows_service.py', ROOT / 'windows_service.py')
+        files.append('windows_service.py')
     settings = {'port':17842,'nativeBase':data.get('openai_base_url','https://chatgpt.com/backend-api/codex'),'keyFile':str(own_key)}
     write_json(ROOT / 'settings.json', settings)
     (ROOT / 'config.backup.toml').write_text(original,encoding='utf-8')
-    text, route = edit_setting(original, '', 'openai_base_url', json.dumps('http://127.0.0.1:17842/v1'))
-    efforts = data.get('desktop',{}).get('enabled-reasoning-efforts',['low','medium','high','xhigh','max','ultra'])
-    text, effort = edit_setting(text, 'desktop', 'enabled-reasoning-efforts', json.dumps(list(dict.fromkeys(['none']+efforts))))
-    tomllib.loads(text)
-    journal = {'root':str(ROOT.resolve()),'node':node,'no_service':no_service,'changes':[route,effort],'files':files,'owns_key':not bool(detected),'status':'prepared'}
+    journal = {'root':str(ROOT.resolve()),'node':node,'no_service':no_service,'changes':changes,'files':files,'owns_key':not bool(detected),'status':'prepared'}
+    if sys.platform == 'win32':
+        journal['pythonw'] = str(Path(sys.executable).with_name('pythonw.exe'))
     write_json(ROOT / 'install.json', journal)
     try:
         if not no_service:
@@ -190,6 +216,59 @@ def install(no_service=False):
             service(False, ROOT, node)
         raise
     print('Installed cmdc-codex. Restart Codex; native models remain the default.')
+
+def verify_gateway():
+    with urllib.request.urlopen('http://127.0.0.1:17842/health', timeout=5) as response:
+        if json.load(response).get('service') != 'codex-commandcode-router-v1':
+            raise RuntimeError('Router port belongs to another service')
+    auth = json.loads((CODEX / 'auth.json').read_text(encoding='utf-8-sig'))
+    token = auth.get('tokens',{}).get('access_token') or auth.get('OPENAI_API_KEY') or os.environ.get('OPENAI_API_KEY')
+    if not token:
+        raise RuntimeError('Sign in to Codex before activating the gateway')
+    headers = {'Authorization':'Bearer '+token}
+    account = auth.get('tokens',{}).get('account_id')
+    if account:
+        headers['ChatGPT-Account-ID'] = account
+    url = 'http://127.0.0.1:17842/v1/models'
+    cache = CODEX / 'models_cache.json'
+    if cache.exists():
+        version = json.loads(cache.read_text(encoding='utf-8-sig')).get('client_version','')
+        if re.fullmatch(r'\d+\.\d+\.\d+',version):
+            url += '?client_version=' + version
+    request = urllib.request.Request(url,headers=headers)
+    with urllib.request.urlopen(request, timeout=60) as response:
+        models = json.load(response).get('models',[])
+    external = [m for m in models if m.get('slug','').startswith('commandcode/')]
+    if not external or len(external) == len(models):
+        raise RuntimeError('Native and CommandCode catalogs must both be available before activation')
+
+def activate():
+    """Recover an existing installation after a manually removed routing config."""
+    journal_path = ROOT / 'install.json'
+    journal = json.loads(journal_path.read_text(encoding='utf-8-sig'))
+    if ROOT.is_symlink() or ROOT.resolve() != Path(journal['root']):
+        raise RuntimeError('Install root ownership changed')
+    original = CONFIG.read_text(encoding='utf-8-sig') if CONFIG.exists() else ''
+    text, changes = configure_gateway(original)
+    data = tomllib.loads(original)
+    settings = json.loads((ROOT/'settings.json').read_text(encoding='utf-8-sig'))
+    if settings['nativeBase'] != data.get('openai_base_url','https://chatgpt.com/backend-api/codex'):
+        raise RuntimeError('Native upstream changed; review the existing route before recovery')
+    verify_gateway()
+    # Record the current user config as the recovery baseline, rather than resurrecting an old backup.
+    backup = ROOT / 'config.backup.toml'
+    previous_backup = backup.read_text(encoding='utf-8')
+    updated = {**journal,'changes':changes,'status':'installed'}
+    try:
+        backup.write_text(original,encoding='utf-8')
+        write_json(journal_path,updated)
+        write_config(text)
+    except Exception:
+        write_config(original)
+        backup.write_text(previous_backup,encoding='utf-8')
+        write_json(journal_path,journal)
+        raise
+    print('Gateway activated after native and CommandCode catalog checks. Restart Codex Desktop to load its new provider.')
 
 def uninstall():
     journal = json.loads((ROOT / 'install.json').read_text(encoding='utf-8'))
@@ -222,11 +301,13 @@ def uninstall():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['install','uninstall','status','refresh'])
+    parser.add_argument('command', choices=['install','activate','uninstall','status','refresh'])
     parser.add_argument('--no-service', action='store_true', help='Configure only; for tests or a separately supervised service')
     args = parser.parse_args()
     if args.command == 'install':
         install(args.no_service)
+    elif args.command == 'activate':
+        activate()
     elif args.command == 'uninstall':
         uninstall()
     else:
