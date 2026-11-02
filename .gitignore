@@ -1,0 +1,12 @@
+.env
+.env.*
+credentials.json
+auth.json
+settings.json
+install.json
+commandcode-models.json
+requests.jsonl
+*.log
+*.backup.toml
+__pycache__/
+dist/
