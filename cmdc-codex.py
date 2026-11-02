@@ -95,7 +95,7 @@ def service(install, root, node):
                     "if($existing){throw 'Task cmdc-codex already exists'}; "
                     "$action=New-ScheduledTaskAction -Execute " + ps_quote(executable) + " -Argument " + ps_quote(arguments) + "; "
                     "$trigger=New-ScheduledTaskTrigger -AtLogOn -User ([Security.Principal.WindowsIdentity]::GetCurrent().Name); "
-                    "$settings=New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries; "
+                    "$settings=New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1); "
                     "Register-ScheduledTask -TaskName 'cmdc-codex' -Action $action -Trigger $trigger -Settings $settings -RunLevel Limited | Out-Null; "
                     "Start-ScheduledTask -TaskName 'cmdc-codex'")
         else:

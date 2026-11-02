@@ -63,5 +63,9 @@ const server = http.createServer(async (req, res) => {
   } catch (e) { if (!res.headersSent) error(res,502,e.message); else res.destroy(); }
 });
 // HTTP rejection lets Codex use its supported SSE fallback without dropping auth.
-server.on('upgrade', (req,socket) => socket.end('HTTP/1.1 426 Upgrade Required\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'));
+server.on('upgrade', (req,socket) => {
+  // Desktop can cancel prewarm while the fallback reply is being written.
+  socket.on('error', () => socket.destroy());
+  socket.end('HTTP/1.1 426 Upgrade Required\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+});
 server.listen(settings.port,'127.0.0.1');
