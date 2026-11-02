@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import time
+import tempfile
 import tomllib
 import urllib.request
 
@@ -26,6 +27,18 @@ def write_json(p, value):
 
 def digest(p):
     return hashlib.sha256(p.read_bytes()).hexdigest()
+
+def write_config(text):
+    CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix='.cmdc-codex-', dir=CONFIG.parent)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            handle.write(text)
+        if CONFIG.exists():
+            os.chmod(temporary, CONFIG.stat().st_mode)
+        os.replace(temporary, CONFIG)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 def edit_setting(text, section, key, value):
     lines = text.splitlines(keepends=True)
@@ -146,7 +159,7 @@ def install(no_service=False):
     efforts = data.get('desktop',{}).get('enabled-reasoning-efforts',['low','medium','high','xhigh','max','ultra'])
     text, effort = edit_setting(text, 'desktop', 'enabled-reasoning-efforts', json.dumps(list(dict.fromkeys(['none']+efforts))))
     tomllib.loads(text)
-    journal = {'root':str(ROOT.resolve()),'node':node,'no_service':no_service,'changes':[route,effort],'files':files,'owns_key':not bool(detected)}
+    journal = {'root':str(ROOT.resolve()),'node':node,'no_service':no_service,'changes':[route,effort],'files':files,'owns_key':not bool(detected),'status':'prepared'}
     write_json(ROOT / 'install.json', journal)
     try:
         if not no_service:
@@ -162,11 +175,14 @@ def install(no_service=False):
                     if attempt==19:
                         raise RuntimeError('Router did not start; config remains unchanged')
                     time.sleep(0.5)
-        CONFIG.parent.mkdir(parents=True, exist_ok=True)
-        CONFIG.write_text(text, encoding='utf-8')
+        write_config(text)
+        journal['status']='installed'
+        write_json(ROOT / 'install.json',journal)
     except Exception:
         # Leave the journal and backup for recovery, but never leave a dead route active.
-        CONFIG.write_text(original, encoding='utf-8')
+        write_config(original)
+        journal['status']='failed'
+        write_json(ROOT / 'install.json',journal)
         if not no_service:
             service(False, ROOT, node)
         raise
@@ -177,12 +193,13 @@ def uninstall():
     if ROOT.is_symlink() or ROOT.resolve() != Path(journal['root']):
         raise RuntimeError('Install root ownership changed')
     text = CONFIG.read_text(encoding='utf-8')
-    for change in reversed(journal['changes']):
-        text = restore_setting(text, change)
+    if journal.get('status','installed')=='installed':
+        for change in reversed(journal['changes']):
+            text = restore_setting(text, change)
     tomllib.loads(text)
     if not journal['no_service']:
         service(False, ROOT, journal['node'])
-    CONFIG.write_text(text, encoding='utf-8')
+    write_config(text)
     # Delete only known owned files; leave unrelated files and both original auth stores intact.
     names = journal['files'] + ['settings.json','commandcode-models.json','requests.jsonl','config.backup.toml','install.json']
     if journal['owns_key']:
