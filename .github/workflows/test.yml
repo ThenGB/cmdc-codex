@@ -19,3 +19,13 @@ jobs:
       - run: python test_installer.py
       - run: node --test src/catalog.test.cjs
       - run: node --check src/router.cjs
+      - name: Enable Linux user service session
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo loginctl enable-linger "$USER"
+          sudo systemctl start "user@$(id -u).service"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+      - name: Test real Linux service lifecycle
+        if: runner.os == 'Linux'
+        run: python test_service.py
