@@ -111,6 +111,16 @@ test('CommandCode catalog failure leaves native models available',async t=>{
  assert.deepEqual((await response.json()).models.map(model=>model.slug),['gpt-native']);
 });
 
+test('model list falls back to persisted cache when native refresh fails',async t=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cmdc-model-cache-fallback-')),capture=path.join(dir,'capture.json');
+ const router=await startRouter(t,catalogMockLines(capture,{nativeResponse:"throw Error('native down')"}));
+ fs.writeFileSync(path.join(router.dir,'codex-home','models_cache.json'),JSON.stringify({models:[{slug:'gpt-native-cached',display_name:'Native Cached'}]}));
+ const response=await fetch('http://127.0.0.1:'+router.port+'/v1/models',{headers:{Authorization:'Bearer '+router.codexToken}});
+ assert.equal(response.status,200);
+ assert.equal(response.headers.get('cache-control'),'no-store');
+ assert.deepEqual((await response.json()).models.map(model=>model.slug),['gpt-native-cached','commandcode/flash']);
+});
+
 test('unknown models and unsupported efforts are rejected before inference',async t=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cmdc-validation-')),capture=path.join(dir,'capture.json');
  const router=await startRouter(t,catalogMockLines(capture,{inferenceResponse:"return Response.json({id:'unexpected'});"}));

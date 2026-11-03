@@ -33,7 +33,7 @@ RUNTIME_FILES = {
 }
 if sys.platform == 'win32':
     RUNTIME_FILES['windows_service.py'] = Path('windows_service.py')
-VERSION = '0.1.5'
+VERSION = '0.1.6'
 MISSING = object()
 
 def write_json(p, value):

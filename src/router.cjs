@@ -8,6 +8,7 @@ const os = require('node:os');
 const home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
 const settings = JSON.parse(fs.readFileSync(path.join(__dirname, 'settings.json')));
 const read = p => JSON.parse(fs.readFileSync(p, 'utf8').replace(/^\uFEFF/, ''));
+const cachedModels = () => { try { const models = read(path.join(home, 'models_cache.json')).models; return Array.isArray(models) ? models : null; } catch (_) { return null; } };
 const catalogManager = require('./catalog.cjs').createCatalog(__dirname, settings);
 function error(res, status, message) { res.writeHead(status, {'Content-Type':'application/json'}); res.end(JSON.stringify({error:{message,type:'invalid_request_error'}})); }
 const server = http.createServer(async (req, res) => {
@@ -53,14 +54,23 @@ const server = http.createServer(async (req, res) => {
       // Diagnostics are optional and must never block model inference.
       try { fs.appendFileSync(path.join(__dirname,'requests.jsonl'),JSON.stringify({at:new Date().toISOString(),model:parsed.model,effort,stream:parsed.stream,promptCacheKeyPresent:!!parsed.prompt_cache_key})+'\n'); } catch (_) {}
     }
-    const upstream = await fetch(url,{method:req.method,headers,body:body.length?body:undefined,signal:abort.signal});
-    if (req.method==='GET' && /^\/v1\/models(?:\?|$)/.test(req.url) && upstream.ok) {
-      const data = await upstream.json();
-      if (!Array.isArray(data.models)) throw Error('Native endpoint did not return a Codex catalog');
-      // A CommandCode outage must never remove native authenticated models.
-      try { data.models.push(...(await catalogManager.refresh()).models); } catch (_) { /* status exposes the refresh failure */ }
-      res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(data));return;
+    if (req.method==='GET' && /^\/v1\/models(?:\?|$)/.test(req.url)) {
+      let data;
+      try {
+        const native=await fetch(url,{method:req.method,headers,signal:AbortSignal.timeout(5000)});
+        if(native.ok)data=await native.json();
+      } catch (_) { /* fall through to the persisted catalog */ }
+      if (!data || !Array.isArray(data.models)) data={models:cachedModels()};
+      if (!Array.isArray(data.models)) return error(res,502,'Model catalog unavailable');
+      // A slow native catalog must not blank the picker; CommandCode refresh is bounded too.
+      try {
+        const external=await Promise.race([catalogManager.refresh(),new Promise((_,reject)=>setTimeout(()=>reject(Error('catalog timeout')),3000))]);
+        const known=new Set(data.models.map(model=>model.slug));
+        data.models.push(...external.models.filter(model=>!known.has(model.slug)));
+      } catch (_) { /* native/cache models remain available */ }
+      res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify({models:data.models}));return;
     }
+    const upstream = await fetch(url,{method:req.method,headers,body:body.length?body:undefined,signal:abort.signal});
     const responseHeaders = {};
     upstream.headers.forEach((v,k) => { if (!['content-length','content-encoding','transfer-encoding','connection'].includes(k)) responseHeaders[k]=v; });
     res.writeHead(upstream.status,responseHeaders);

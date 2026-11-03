@@ -52,6 +52,8 @@ The router reads CommandCode's authenticated client catalog, public endpoint sup
 
 Refresh follows the server's `refreshAfterSeconds` (currently 900 seconds), checked every minute and when requested. Changing the locally stored API key forces the next refresh. Reopening the selector/refreshing the Codex model list loads the refreshed catalog; the app can cache its own list independently. Native models are fetched from the native authenticated endpoint, not pinned to a bundled list. A CommandCode refresh failure leaves native models available. A transient refresh failure may keep the last successful CommandCode catalog for the same key; upstream inference still enforces current access.
 
+Model-list refresh uses a 5-second native timeout and falls back to the persisted native cache; the CommandCode merge is bounded to 3 seconds. A slow upstream therefore cannot blank the picker.
+
 ```sh
 python3 cmdc-codex.py status
 python3 cmdc-codex.py refresh
