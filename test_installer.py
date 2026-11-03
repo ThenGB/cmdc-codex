@@ -1,6 +1,7 @@
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -24,6 +25,21 @@ class InstallerTests(unittest.TestCase):
             auth.parent.mkdir()
             auth.write_text(json.dumps({'apiKey':'detected-placeholder-only','userName':'test'}))
             self.assertEqual(installer.detect_commandcode_key(),('detected-placeholder-only',auth))
+
+    def test_detects_platform_app_data_login(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home=Path(directory);installer.HOME=home
+            environment={'APPDATA':str(home/'appdata'),'LOCALAPPDATA':str(home/'local'),
+                         'XDG_CONFIG_HOME':str(home/'xdg')}
+            with patch.dict(installer.os.environ,environment,clear=False):
+                if installer.sys.platform=='win32':
+                    auth=home/'appdata/commandcode/auth.json'
+                elif installer.sys.platform=='darwin':
+                    auth=home/'Library/Application Support/commandcode/auth.json'
+                else:
+                    auth=home/'xdg/commandcode/auth.json'
+                auth.parent.mkdir(parents=True);auth.write_text(json.dumps({'apiKey':'platform-placeholder-only'}))
+                self.assertEqual(installer.detect_commandcode_key(),('platform-placeholder-only',auth))
 
     def test_missing_commandcode_login_prompts_and_stores_key(self):
         with tempfile.TemporaryDirectory() as directory:

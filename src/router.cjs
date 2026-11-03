@@ -15,7 +15,8 @@ const server = http.createServer(async (req, res) => {
   res.on('close', () => { if (!res.writableEnded) abort.abort(); });
   try {
     if (req.url === '/health') { res.setHeader('Content-Type','application/json');res.end(JSON.stringify({service:'codex-commandcode-router-v1',catalog:catalogManager.status()})); return; }
-    const auth = read(path.join(home, 'auth.json'));
+    let auth={};
+    try { auth=read(path.join(home, 'auth.json')); } catch (_) {}
     const tokens = [auth.tokens?.access_token,auth.OPENAI_API_KEY,process.env.OPENAI_API_KEY].filter(Boolean);
     if (!tokens.some(token => req.headers.authorization === 'Bearer ' + token)) return error(res,401,'Codex authentication required');
     if (req.url === '/refresh' && req.method === 'POST') { await catalogManager.refresh(true);res.setHeader('Content-Type','application/json');res.end(JSON.stringify(catalogManager.status()));return; }
@@ -26,10 +27,12 @@ const server = http.createServer(async (req, res) => {
       const decoders = {zstd:zlib.zstdDecompressSync,gzip:zlib.gunzipSync,br:zlib.brotliDecompressSync,deflate:zlib.inflateSync};
       const encoding = req.headers['content-encoding'];
       if (encoding && !decoders[encoding]) return error(res,415,'Unsupported content encoding');
-      const decoded = encoding ? decoders[encoding](body,{maxOutputLength:64*1024*1024}) : body;
-      parsed = JSON.parse(decoded.toString('utf8'));
+      try {
+        const decoded = encoding ? decoders[encoding](body,{maxOutputLength:64*1024*1024}) : body;
+        parsed = JSON.parse(decoded.toString('utf8'));
+      } catch (_) { return error(res,400,'Invalid JSON request body'); }
     }
-    const external = parsed?.model?.startsWith('commandcode/');
+    const external = typeof parsed?.model==='string' && parsed.model.startsWith('commandcode/');
     let url = settings.nativeBase + req.url.replace(/^\/v1/, '');
     const headers = new Headers();
     for (const [k,v] of Object.entries(req.headers)) if (!['host','connection','content-length','transfer-encoding','accept-encoding','upgrade'].includes(k) && v) headers.set(k,v);
@@ -47,7 +50,8 @@ const server = http.createServer(async (req, res) => {
       headers.set('Content-Type','application/json');
       headers.set('Authorization','Bearer '+require('./catalog.cjs').getKey(settings));
       url = 'https://api.commandcode.ai/provider/v1/responses';
-      fs.appendFileSync(path.join(__dirname,'requests.jsonl'),JSON.stringify({at:new Date().toISOString(),model:parsed.model,effort,stream:parsed.stream,promptCacheKeyPresent:!!parsed.prompt_cache_key})+'\n');
+      // Diagnostics are optional and must never block model inference.
+      try { fs.appendFileSync(path.join(__dirname,'requests.jsonl'),JSON.stringify({at:new Date().toISOString(),model:parsed.model,effort,stream:parsed.stream,promptCacheKeyPresent:!!parsed.prompt_cache_key})+'\n'); } catch (_) {}
     }
     const upstream = await fetch(url,{method:req.method,headers,body:body.length?body:undefined,signal:abort.signal});
     if (req.method==='GET' && /^\/v1\/models(?:\?|$)/.test(req.url) && upstream.ok) {

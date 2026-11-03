@@ -2,10 +2,29 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const os = require('node:os');
+function commandcodeAuthPaths() {
+  const paths = [path.join(os.homedir(),'.commandcode','auth.json')];
+  if (process.platform === 'win32') {
+    for (const name of ['APPDATA','LOCALAPPDATA']) {
+      if (process.env[name]) paths.push(path.join(process.env[name],'commandcode','auth.json'));
+    }
+  } else if (process.platform === 'darwin') {
+    paths.push(path.join(os.homedir(),'Library','Application Support','commandcode','auth.json'));
+  } else {
+    paths.push(path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(),'.config'),
+                         'commandcode','auth.json'));
+  }
+  return [...new Set(paths)];
+}
 function getKey(settings) {
-  const auth = path.join(os.homedir(),'.commandcode','auth.json');
-  if (fs.existsSync(auth)) {const value=read(auth).apiKey;if(value)return value;}
-  return read(settings.keyFile).apiKey;
+  const environment = process.env.COMMANDCODE_API_KEY?.trim();
+  if (environment) return environment;
+  for (const auth of commandcodeAuthPaths()) {
+    try {const value=read(auth).apiKey;if(value)return value;} catch (_) {}
+  }
+  const value = read(settings.keyFile).apiKey;
+  if (value) return value;
+  throw Error('CommandCode login/API key not found');
 }
 const read = p => JSON.parse(fs.readFileSync(p,'utf8').replace(/^\uFEFF/,''));
 const ranks = ['individual-go','individual-go-v1','individual-goat','individual-pro','individual-pro-v1','individual-provider','individual-max','individual-ultra','teams-pro'];
@@ -26,9 +45,21 @@ function createCatalog(dir, settings) {
   const file = path.join(dir,'commandcode-models.json');
   const template = {base_instructions:'You are Codex, a coding agent. Use the provided tools to complete the user task. Preserve existing work and report verification accurately.',shell_type:'unified_exec',visibility:'list',supported_in_api:true,effective_context_window_percent:95,truncation_policy:{mode:'tokens',limit:10000},experimental_supported_tools:[],support_verbosity:false,apply_patch_tool_type:'freeform',supports_search_tool:false,use_responses_lite:false,tool_mode:'code_mode_only'};
   let state, pending, lastError;
+  function loadPersisted(fingerprint) {
+    try {
+      const saved=read(file);
+      if (saved?.fingerprint===fingerprint && Array.isArray(saved.models) && saved.models.length &&
+          Number.isFinite(Number(saved.refreshAfterSeconds))) {
+        state={...saved,nextRefresh:Number(saved.nextRefresh)||0};
+        return true;
+      }
+    } catch (_) {}
+    return false;
+  }
   async function refresh(force=false) {
     const key = getKey(settings);
     const fingerprint = crypto.createHash('sha256').update(key).digest('hex');
+    if (!state) loadPersisted(fingerprint);
     if (!force && state?.fingerprint===fingerprint && Date.now()<state.nextRefresh) return state;
     if (pending) return pending;
     pending = (async()=>{
@@ -46,6 +77,10 @@ function createCatalog(dir, settings) {
     })();
     return pending;
   }
+  try {
+    const key=getKey(settings);
+    loadPersisted(crypto.createHash('sha256').update(key).digest('hex'));
+  } catch (_) {}
   const timer=setInterval(()=>refresh().catch(()=>{}),60000);timer.unref();
   return {refresh,status:()=>({updatedAt:state?.updatedAt,plan:state?.plan,count:state?.models.length,nextRefresh:state?.nextRefresh,lastError})};
 }

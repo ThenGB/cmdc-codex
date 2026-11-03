@@ -24,7 +24,7 @@ CODEX = Path(os.environ.get('CODEX_HOME', HOME / '.codex'))
 ROOT = (CODEX if sys.platform == 'win32' else HOME / '.local/share') / NAME
 CONFIG = CODEX / 'config.toml'
 COMMANDCODE_API = 'https://api.commandcode.ai'
-VERSION = '0.1.3'
+VERSION = '0.1.4'
 
 def write_json(p, value):
     p.write_text(json.dumps(value, indent=2), encoding='utf-8')
