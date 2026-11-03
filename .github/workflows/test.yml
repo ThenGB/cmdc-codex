@@ -19,7 +19,7 @@ jobs:
       - run: python test_installer.py
       - run: python test_windows_launcher.py
       - run: python verify_release.py
-      - run: node --test src/catalog.test.cjs src/router.test.cjs src/multimodal.test.cjs
+      - run: node --test src/catalog.test.cjs src/router.test.cjs src/router.integration.test.cjs src/multimodal.test.cjs
       - run: node --check src/router.cjs
       - name: Enable Linux user service session
         if: runner.os == 'Linux'
