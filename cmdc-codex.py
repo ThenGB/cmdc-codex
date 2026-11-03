@@ -15,6 +15,7 @@ import tempfile
 import tomllib
 import urllib.request
 import urllib.parse
+import urllib.error
 
 NAME = 'cmdc-codex'
 BASE = Path(__file__).resolve().parent
@@ -22,6 +23,8 @@ HOME = Path.home()
 CODEX = Path(os.environ.get('CODEX_HOME', HOME / '.codex'))
 ROOT = (CODEX if sys.platform == 'win32' else HOME / '.local/share') / NAME
 CONFIG = CODEX / 'config.toml'
+COMMANDCODE_API = 'https://api.commandcode.ai'
+VERSION = '0.1.3'
 
 def write_json(p, value):
     p.write_text(json.dumps(value, indent=2), encoding='utf-8')
@@ -108,6 +111,49 @@ def configure_gateway(original):
     tomllib.loads(text)
     return text, changes
 
+def commandcode_auth_paths():
+    paths = [HOME / '.commandcode/auth.json']
+    if sys.platform == 'win32':
+        for name in ('APPDATA', 'LOCALAPPDATA'):
+            if os.environ.get(name):
+                paths += [Path(os.environ[name]) / 'commandcode/auth.json',
+                          Path(os.environ[name]) / 'CommandCode/auth.json']
+    elif sys.platform == 'darwin':
+        paths.append(HOME / 'Library/Application Support/commandcode/auth.json')
+    else:
+        config = Path(os.environ.get('XDG_CONFIG_HOME', HOME / '.config'))
+        paths.append(config / 'commandcode/auth.json')
+    return list(dict.fromkeys(paths))
+
+def detect_commandcode_key():
+    environment_key = os.environ.get('COMMANDCODE_API_KEY', '').strip()
+    if environment_key:
+        return environment_key, 'COMMANDCODE_API_KEY'
+    for path in commandcode_auth_paths():
+        try:
+            key = json.loads(path.read_text(encoding='utf-8-sig')).get('apiKey')
+        except (FileNotFoundError, OSError, ValueError, AttributeError):
+            continue
+        if isinstance(key, str) and key.strip():
+            return key.strip(), path
+    return None, None
+
+def validate_commandcode_key(key):
+    # Provider API keys do not necessarily have account/billing scopes.
+    request = urllib.request.Request(COMMANDCODE_API + '/provider/v1/models?view=client',
+                                     headers={'Authorization':'Bearer '+key,
+                                              'Accept':'application/json',
+                                              'User-Agent':'cmdc-codex/'+VERSION})
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            if response.status != 200:
+                raise RuntimeError('CommandCode login check returned HTTP '+str(response.status))
+            json.load(response)
+    except urllib.error.HTTPError as error:
+        raise RuntimeError('CommandCode login/API key was rejected (HTTP '+str(error.code)+')') from error
+    except urllib.error.URLError as error:
+        raise RuntimeError('Unable to verify CommandCode login: '+str(error.reason)) from error
+
 def service(install, root, node):
     script = root / 'router.cjs'
     if sys.platform == 'win32':
@@ -163,16 +209,31 @@ def install(no_service=False):
     original = CONFIG.read_text(encoding='utf-8-sig') if CONFIG.exists() else ''
     data = tomllib.loads(original)
     text, changes = configure_gateway(original)
+    detected, source = detect_commandcode_key()
+    if detected:
+        print('Detected CommandCode login from '+str(source)+'.')
+        try:
+            validate_commandcode_key(detected)
+        except RuntimeError as error:
+            print(str(error)+'; enter a current API key.')
+            detected = None
+            source = None
+    if not detected:
+        try:
+            detected = getpass.getpass('CommandCode API key (input hidden): ').strip()
+        except (EOFError, KeyboardInterrupt) as error:
+            raise RuntimeError('No CommandCode API key was supplied') from error
+        if not detected:
+            raise RuntimeError('CommandCode API key is empty')
+        validate_commandcode_key(detected)
+        print('CommandCode API key validated.')
     ROOT.mkdir(parents=True, exist_ok=True)
     if ROOT.is_symlink():
         raise RuntimeError('Install directory must not be a symlink')
-    auth = HOME / '.commandcode/auth.json'
-    detected = json.loads(auth.read_text(encoding='utf-8')).get('apiKey') if auth.exists() else None
     own_key = ROOT / 'credentials.json'
-    if not detected:
-        key = getpass.getpass('CommandCode API key: ').strip()
-        if not key:
-            raise RuntimeError('API key is empty')
+    should_store_key = source is None or source == 'COMMANDCODE_API_KEY'
+    if should_store_key:
+        key = detected
         fd = os.open(own_key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, 'w', encoding='utf-8') as handle:
             json.dump({'apiKey':key}, handle)
@@ -193,7 +254,7 @@ def install(no_service=False):
     settings = {'port':17842,'nativeBase':data.get('openai_base_url','https://chatgpt.com/backend-api/codex'),'keyFile':str(own_key)}
     write_json(ROOT / 'settings.json', settings)
     (ROOT / 'config.backup.toml').write_text(original,encoding='utf-8')
-    journal = {'root':str(ROOT.resolve()),'node':node,'no_service':no_service,'changes':changes,'files':files,'owns_key':not bool(detected),'status':'prepared'}
+    journal = {'root':str(ROOT.resolve()),'node':node,'no_service':no_service,'changes':changes,'files':files,'owns_key':should_store_key,'status':'prepared'}
     if sys.platform == 'win32':
         journal['pythonw'] = str(Path(sys.executable).with_name('pythonw.exe'))
     write_json(ROOT / 'install.json', journal)

@@ -1,5 +1,7 @@
 # cmdc-codex
 
+On Windows, double-click install.cmd for a visible terminal that remains open after success or failure. The installer detects the official CommandCode CLI login, validates it with CommandCode, and asks for an API key using hidden input when no valid login exists.
+
 Use CommandCode models alongside native authenticated models in Codex Desktop and CLI through the `cmdc-codex` gateway provider. Native models keep their original IDs, metadata, credentials and default selection. CommandCode models use the `commandcode/` prefix so selecting a model determines its route.
 
 ## Requirements
