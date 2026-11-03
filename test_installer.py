@@ -1,14 +1,78 @@
 import importlib.util
+import io
 import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('installer',Path(__file__).with_name('cmdc-codex.py'))
 installer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(installer)
 
 class InstallerTests(unittest.TestCase):
+    def setUp(self):
+        self.validate_patch=patch.object(installer,'validate_commandcode_key')
+        self.validate=self.validate_patch.start()
+        self.addCleanup(self.validate_patch.stop)
+
+    def test_detects_commandcode_cli_login(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home=Path(directory)
+            installer.HOME=home
+            auth=home/'.commandcode/auth.json'
+            auth.parent.mkdir()
+            auth.write_text(json.dumps({'apiKey':'detected-placeholder-only','userName':'test'}))
+            self.assertEqual(installer.detect_commandcode_key(),('detected-placeholder-only',auth))
+
+    def test_missing_commandcode_login_prompts_and_stores_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home=Path(directory)
+            installer.HOME=home;installer.ROOT=home/'runtime';installer.CODEX=home/'.codex';installer.CONFIG=installer.CODEX/'config.toml'
+            installer.CODEX.mkdir();installer.CONFIG.write_text('model = "native-model"\n')
+            with patch.object(installer.getpass,'getpass',return_value='prompted-placeholder-only'):
+                installer.install(no_service=True)
+            self.validate.assert_called_once_with('prompted-placeholder-only')
+            self.assertEqual(json.loads((installer.ROOT/'credentials.json').read_text())['apiKey'],'prompted-placeholder-only')
+            self.assertTrue(json.loads((installer.ROOT/'install.json').read_text())['owns_key'])
+
+    def test_rejected_login_prompts_for_replacement_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home=Path(directory)
+            installer.HOME=home;installer.ROOT=home/'runtime';installer.CODEX=home/'.codex';installer.CONFIG=installer.CODEX/'config.toml'
+            installer.CODEX.mkdir();installer.CONFIG.write_text('model = "native-model"\n')
+            auth=home/'.commandcode/auth.json';auth.parent.mkdir()
+            auth.write_text(json.dumps({'apiKey':'stale-placeholder-only'}))
+            self.validate.side_effect=[RuntimeError('CommandCode login/API key was rejected (HTTP 401)'),None]
+            with patch.object(installer.getpass,'getpass',return_value='replacement-placeholder-only'):
+                installer.install(no_service=True)
+            self.assertEqual([call.args[0] for call in self.validate.call_args_list],
+                             ['stale-placeholder-only','replacement-placeholder-only'])
+            self.assertEqual(json.loads((installer.ROOT/'credentials.json').read_text())['apiKey'],
+                             'replacement-placeholder-only')
+
+    def test_reactivate_after_manual_config_reset_keeps_current_user_settings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home=Path(directory)
+            installer.HOME=home;installer.ROOT=home/'runtime';installer.CODEX=home/'.codex';installer.CONFIG=installer.CODEX/'config.toml'
+            installer.CODEX.mkdir()
+            original='model = "native-model"\n'
+            installer.CONFIG.write_text(original)
+            auth=home/'.commandcode/auth.json';auth.parent.mkdir();auth.write_text(json.dumps({'apiKey':'test-placeholder-only'}))
+            installer.install(no_service=True)
+            reset=original+'[desktop]\nfollowUpQueueMode = "queue"\n'
+            installer.CONFIG.write_text(reset)
+            self.assertTrue(callable(getattr(installer,'activate',None)), 'Recovery must support a manually reset config')
+            with patch.object(installer,'verify_gateway',side_effect=OSError('service down')):
+                with self.assertRaises(OSError):installer.activate()
+            self.assertEqual(installer.CONFIG.read_text(),reset)
+            with patch.object(installer,'verify_gateway',return_value=None):installer.activate()
+            data=installer.tomllib.loads(installer.CONFIG.read_text())
+            self.assertEqual(data['model_provider'],'cmdc-codex')
+            self.assertEqual(data['desktop']['followUpQueueMode'],'queue')
+            installer.uninstall()
+            self.assertIn(reset,installer.CONFIG.read_text())
+
     def test_safe_roundtrip_and_unrelated_changes(self):
         with tempfile.TemporaryDirectory() as directory:
             home=Path(directory)
@@ -25,7 +89,18 @@ class InstallerTests(unittest.TestCase):
             installer.install(no_service=True)
             self.assertFalse((installer.ROOT/'credentials.json').exists())
             installed=installer.CONFIG.read_text()
-            self.assertEqual(installer.tomllib.loads(installed)['model'],'native-model')
+            effective=installer.tomllib.loads(installed)
+            self.assertEqual(effective['model'],'native-model')
+            # Desktop's active account whitelist hides foreign IDs on the built-in provider.
+            # A real gateway provider must expose the live catalog without replacing auth.
+            self.assertEqual(effective.get('model_provider','openai'),'cmdc-codex')
+            gateway=effective['model_providers']['cmdc-codex']
+            self.assertTrue(gateway['requires_openai_auth'])
+            self.assertFalse(gateway['supports_websockets'])
+            self.assertEqual(gateway['base_url'],'http://127.0.0.1:17842/v1')
+            self.assertNotIn('model_catalog_json',effective)
+            self.assertEqual(effective['openai_base_url'],'http://127.0.0.1:17842/v1')
+            self.assertEqual(json.loads((installer.ROOT/'settings.json').read_text())['nativeBase'],'http://127.0.0.1:17841/v1')
             installer.CONFIG.write_text(installed+'\n[features]\nmulti_agent = true\n')
             installer.uninstall()
             restored=installer.CONFIG.read_text()
@@ -37,6 +112,10 @@ class InstallerTests(unittest.TestCase):
         text,change=installer.edit_setting('model = "native"\n','','openai_base_url','"http://localhost:17842/v1"')
         with self.assertRaises(RuntimeError):
             installer.restore_setting(text.replace('17842','19999'),change)
+
+    def test_router_cannot_be_its_own_native_upstream(self):
+        with self.assertRaises(RuntimeError):
+            installer.configure_gateway('openai_base_url = "http://127.0.0.1:17842/v1"\n')
 
     def test_nested_route_is_not_changed(self):
         source='[other]\nopenai_base_url = "leave me"\n'
@@ -86,12 +165,34 @@ class InstallerTests(unittest.TestCase):
             try:
                 with self.assertRaises(RuntimeError):installer.uninstall()
                 self.assertNotIn('openai_base_url',installer.CONFIG.read_text())
+                self.assertNotIn('model_provider',installer.tomllib.loads(installer.CONFIG.read_text()))
                 self.assertEqual(json.loads(journal.read_text())['status'],'config_restored')
                 installer.service=lambda *_:None
                 installer.uninstall()
                 self.assertTrue(auth.exists())
                 self.assertFalse(journal.exists())
             finally:installer.service=real_service
+
+class CommandCodeValidationTests(unittest.TestCase):
+    def test_provider_key_validation_uses_provider_scope_and_client_headers(self):
+        class Response(io.BytesIO):
+            status=200
+            def __enter__(self):return self
+            def __exit__(self,*_):pass
+        captured={}
+        def urlopen(request,timeout):
+            captured.update(url=request.full_url,timeout=timeout,
+                            authorization=request.get_header('Authorization'),
+                            user_agent=request.get_header('User-agent'),
+                            accept=request.get_header('Accept'))
+            return Response(b'{"data":[]}')
+        with patch.object(installer.urllib.request,'urlopen',side_effect=urlopen):
+            installer.validate_commandcode_key('placeholder-only')
+        self.assertEqual(captured['url'],installer.COMMANDCODE_API+'/provider/v1/models?view=client')
+        self.assertEqual(captured['authorization'],'Bearer placeholder-only')
+        self.assertEqual(captured['user_agent'],'cmdc-codex/'+installer.VERSION)
+        self.assertEqual(captured['accept'],'application/json')
+        self.assertEqual(captured['timeout'],20)
 
 if __name__=='__main__':
     unittest.main()
