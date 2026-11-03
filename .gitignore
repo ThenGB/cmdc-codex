@@ -6,7 +6,15 @@ settings.json
 install.json
 commandcode-models.json
 requests.jsonl
+models_cache.json
 *.log
 *.backup.toml
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.pid
+*.sock
+*.zip
+*.tar.gz
 __pycache__/
 dist/

@@ -63,6 +63,8 @@ If you manually removed the routing config while leaving an installation present
 
 ## Limits and diagnostics
 
+The test suite verifies catalog TTL reuse, forced/auth-triggered refreshes, prompt cache key forwarding, and cached token passthrough. Run verify_release.py to check tracked files and reachable Git history; pass --archive after building a release ZIP to scan that archive with the same local credential values. The report never prints credential contents.
+
 - SSE responses, cancellation, client-side function/custom tools and cache usage pass through. WebSockets fall back to HTTP/SSE.
 - Multimodal tool results retain their text and images, with images sent as image messages. This avoids counting image base64 as plain text in CommandCode's tool-result conversion; no history is silently trimmed.
 - External models cannot inherit every OpenAI-hosted feature. Image input requires upstream support; hosted search, remote compaction, voice and other specialized features depend on the selected provider. Native routes remain available for native features.
