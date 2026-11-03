@@ -14,6 +14,7 @@ import time
 import tempfile
 import tomllib
 import urllib.request
+import urllib.parse
 
 NAME = 'cmdc-codex'
 BASE = Path(__file__).resolve().parent
@@ -85,12 +86,18 @@ def ps_quote(s):
 
 def configure_gateway(original):
     data = tomllib.loads(original)
+    upstream = urllib.parse.urlsplit(data.get('openai_base_url','https://chatgpt.com/backend-api/codex'))
+    if upstream.hostname in ('127.0.0.1','localhost','::1') and upstream.port == 17842:
+        raise RuntimeError('The router cannot be its own native upstream; restore the original route first')
     if data.get('model_provider', 'openai') != 'openai' or data.get('model_catalog_json'):
         raise RuntimeError('Restore native provider/catalog first; existing custom configuration is preserved')
     if 'cmdc-codex' in data.get('model_providers', {}):
         raise RuntimeError('Provider cmdc-codex already exists; refusing to overwrite it')
     text, provider = edit_setting(original, '', 'model_provider', json.dumps('cmdc-codex'))
     changes = [provider]
+    # Existing conversations retain provider=openai when the global provider changes.
+    text, legacy_route = edit_setting(text, '', 'openai_base_url', json.dumps('http://127.0.0.1:17842/v1'))
+    changes.append(legacy_route)
     for key, value in {'name':'CommandCode + native Codex', 'base_url':'http://127.0.0.1:17842/v1',
                        'wire_api':'responses', 'requires_openai_auth':True, 'supports_websockets':False}.items():
         text, change = edit_setting(text, 'model_providers.cmdc-codex', key, json.dumps(value))

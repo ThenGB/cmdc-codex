@@ -58,7 +58,8 @@ class InstallerTests(unittest.TestCase):
             self.assertFalse(gateway['supports_websockets'])
             self.assertEqual(gateway['base_url'],'http://127.0.0.1:17842/v1')
             self.assertNotIn('model_catalog_json',effective)
-            self.assertEqual(effective['openai_base_url'],'http://127.0.0.1:17841/v1')
+            self.assertEqual(effective['openai_base_url'],'http://127.0.0.1:17842/v1')
+            self.assertEqual(json.loads((installer.ROOT/'settings.json').read_text())['nativeBase'],'http://127.0.0.1:17841/v1')
             installer.CONFIG.write_text(installed+'\n[features]\nmulti_agent = true\n')
             installer.uninstall()
             restored=installer.CONFIG.read_text()
@@ -70,6 +71,10 @@ class InstallerTests(unittest.TestCase):
         text,change=installer.edit_setting('model = "native"\n','','openai_base_url','"http://localhost:17842/v1"')
         with self.assertRaises(RuntimeError):
             installer.restore_setting(text.replace('17842','19999'),change)
+
+    def test_router_cannot_be_its_own_native_upstream(self):
+        with self.assertRaises(RuntimeError):
+            installer.configure_gateway('openai_base_url = "http://127.0.0.1:17842/v1"\n')
 
     def test_nested_route_is_not_changed(self):
         source='[other]\nopenai_base_url = "leave me"\n'
