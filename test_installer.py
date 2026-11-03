@@ -124,6 +124,70 @@ class InstallerTests(unittest.TestCase):
             self.assertIn('multi_agent = true',restored)
             self.assertTrue(auth.exists())
 
+    def test_existing_bili_wrapper_is_preserved_and_used_for_gateway(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home=Path(directory)
+            installer.HOME=home;installer.ROOT=home/'runtime';installer.CODEX=home/'.codex';installer.CONFIG=installer.CODEX/'config.toml'
+            installer.CODEX.mkdir()
+            native_wrapper='http://127.0.0.1:8787/bili/https://chatgpt.com/backend-api/codex'
+            original=(f'openai_base_url = "{native_wrapper}"\nmodel = "native-model"\n'
+                      '[marketplaces.ponytail]\nsource_type = "git"\n'
+                      '[plugins."ponytail@ponytail"]\nenabled = true\n')
+            installer.CONFIG.write_text(original)
+            auth=home/'.commandcode/auth.json';auth.parent.mkdir();auth.write_text(json.dumps({'apiKey':'test-placeholder-only'}))
+            installer.install(no_service=True)
+            installed=installer.CONFIG.read_text()
+            effective=installer.tomllib.loads(installed)
+            wrapped_router='http://127.0.0.1:8787/bili/http://127.0.0.1:17842/v1'
+            self.assertEqual(effective['openai_base_url'],wrapped_router)
+            self.assertEqual(effective['model_providers']['cmdc-codex']['base_url'],wrapped_router)
+            self.assertEqual(effective['plugins']['ponytail@ponytail']['enabled'],True)
+            self.assertEqual(effective['marketplaces']['ponytail']['source_type'],'git')
+            self.assertEqual(json.loads((installer.ROOT/'settings.json').read_text())['nativeBase'],native_wrapper)
+            installer.uninstall()
+            restored=installer.tomllib.loads(installer.CONFIG.read_text())
+            self.assertEqual(restored['openai_base_url'],native_wrapper)
+            self.assertEqual(restored['plugins']['ponytail@ponytail']['enabled'],True)
+            self.assertNotIn('cmdc-codex',restored.get('model_providers',{}))
+
+    def test_active_plugin_wrapper_survives_upgrade_byte_for_byte(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home=Path(directory)
+            installer.HOME=home;installer.ROOT=home/'runtime';installer.CODEX=home/'.codex';installer.CONFIG=installer.CODEX/'config.toml'
+            installer.CODEX.mkdir();installer.CONFIG.write_text('model = "native-model"\n')
+            auth=home/'.commandcode/auth.json';auth.parent.mkdir();auth.write_text(json.dumps({'apiKey':'test-placeholder-only'}))
+            installer.install(no_service=True)
+            wrapped=installer.CONFIG.read_text().replace(
+                'http://127.0.0.1:17842/v1','http://127.0.0.1:8787/bili/http://127.0.0.1:17842/v1')
+            wrapped+='\n[marketplaces.ponytail]\nsource = "https://github.com/DietrichGebert/ponytail.git"\n'
+            wrapped+='\n[plugins."ponytail@ponytail"]\nenabled = true\n'
+            installer.CONFIG.write_text(wrapped)
+            text,changes=installer.configure_gateway(wrapped)
+            self.assertEqual(text,wrapped)
+            self.assertEqual(changes,[])
+            installer.upgrade()
+            self.assertEqual(installer.CONFIG.read_text(),wrapped)
+            journal=json.loads((installer.ROOT/'install.json').read_text())
+            self.assertEqual(journal['version'],installer.VERSION)
+            self.assertEqual(json.loads((installer.ROOT/'settings.json').read_text())['version'],installer.VERSION)
+
+    def test_upgrade_preserves_supervisor_interpreter(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home=Path(directory)
+            installer.HOME=home;installer.ROOT=home/'runtime';installer.CODEX=home/'.codex';installer.CONFIG=installer.CODEX/'config.toml'
+            installer.CODEX.mkdir();installer.CONFIG.write_text('model = "native-model"\n')
+            auth=home/'.commandcode/auth.json';auth.parent.mkdir();auth.write_text(json.dumps({'apiKey':'test-placeholder-only'}))
+            installer.install(no_service=True)
+            journal_path=installer.ROOT/'install.json'
+            journal=json.loads(journal_path.read_text())
+            journal['pythonw']=str(home/'existing-pythonw.exe')
+            installer.write_json(journal_path,journal)
+            before=installer.CONFIG.read_text()
+            installer.upgrade()
+            upgraded=json.loads(journal_path.read_text())
+            self.assertEqual(upgraded['pythonw'],journal['pythonw'])
+            self.assertEqual(installer.CONFIG.read_text(),before)
+
     def test_conflicting_change_is_not_overwritten(self):
         text,change=installer.edit_setting('model = "native"\n','','openai_base_url','"http://localhost:17842/v1"')
         with self.assertRaises(RuntimeError):

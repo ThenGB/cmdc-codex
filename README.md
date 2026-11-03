@@ -30,9 +30,21 @@ The installer reuses `~/.commandcode/auth.json` if it contains an API key. Other
 
 Restart Codex and open a new chat. Select native models as before, or select a model ending in `(CommandCode)`. The router preserves native credentials and sends only the CommandCode key to CommandCode.
 
-Installation is per user, without administrator/root access. Existing custom providers or static model catalogs are not overwritten: restore native provider configuration first. An existing local native gateway is preserved as the native upstream; it must keep running independently. The router listens only on `127.0.0.1:17842` and requires the current Codex bearer credential. The configured gateway uses existing Codex authentication (`requires_openai_auth = true`) and lets Desktop display the live catalog without applying its built-in OpenAI account model whitelist. Existing conversations can retain provider `openai`, so `openai_base_url` also points to the router. The original native upstream is saved separately in router settings and restored on uninstall; auth files remain untouched.
+Installation is per user, without administrator/root access. Existing custom providers or static model catalogs are not overwritten: restore native provider configuration first. Path-style plugin wrappers are preserved: if `openai_base_url` is already `http://plugin-prefix/https://native-upstream`, the installer places `http://127.0.0.1:17842/v1` inside that wrapper and records the complete wrapped native route separately. An existing local native gateway is preserved as the native upstream; it must keep running independently. The router listens only on `127.0.0.1:17842` and requires the current Codex bearer credential. The configured gateway uses existing Codex authentication (`requires_openai_auth = true`) and lets Desktop display the live catalog without applying its built-in OpenAI account model whitelist. Existing conversations can retain provider `openai`, so `openai_base_url` also points through the same frontdoor. Auth files remain untouched.
 
 On Windows, Task Scheduler runs a `pythonw.exe` supervisor that launches Node without a console. The supervisor waits for Node and returns its exit status, so task retries still work. Closing an interactive console cannot terminate this router through a shared console control event.
+
+## Plugin-safe upgrades
+
+Plugin marketplaces, hooks, MCP servers, skills and unrelated provider fields are left byte-for-byte untouched. When Bili or another path wrapper is already around the router, `configure_gateway` recognizes the router anywhere inside the wrapper instead of replacing the frontdoor. An already active route is a no-op, so plugin updates and repeated installs cannot flatten the chain.
+
+Upgrade only the owned router files and service; never rewrite the Codex/plugin route:
+
+```sh
+python3 cmdc-codex.py upgrade
+```
+
+On Windows use `python`. Running `install` against an existing active installation delegates to the same in-place upgrade. Runtime replacement is rolled back if the owned service cannot restart and pass its health check.
 
 ## Automatic model and effort updates
 
@@ -59,7 +71,7 @@ Effort values are not invented. `off` in the CommandCode client catalog is expos
 sh uninstall.sh
 ```
 
-Uninstall stops only the owned user service/task and restores only the managed provider and effort settings. Unrelated configuration changes and existing credential stores remain intact. If a managed setting or service has been edited after installation, uninstall refuses to overwrite it; review the local backup and journal to resolve the conflict. Files outside the known installation manifest are retained.
+Uninstall stops only the owned user service/task and removes only the router hop. If a plugin wrapper still contains the router, uninstall substitutes the saved native upstream inside that same wrapper; it never flattens or deletes a plugin-added prefix. Unrelated configuration changes and existing credential stores remain intact. If the service itself has been replaced or edited, uninstall refuses to stop it; review the local backup and journal to resolve the conflict. Files outside the known installation manifest are retained.
 
 If you manually removed the routing config while leaving an installation present, start its service first, then run `python cmdc-codex.py activate`. Recovery verifies that both live catalogs are available before activating the gateway, and uses your current config as the uninstall baseline. Restart Desktop afterward to replace its existing provider connection and cached picker state.
 

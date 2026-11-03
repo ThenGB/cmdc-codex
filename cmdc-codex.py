@@ -24,7 +24,17 @@ CODEX = Path(os.environ.get('CODEX_HOME', HOME / '.codex'))
 ROOT = (CODEX if sys.platform == 'win32' else HOME / '.local/share') / NAME
 CONFIG = CODEX / 'config.toml'
 COMMANDCODE_API = 'https://api.commandcode.ai'
-VERSION = '0.1.4'
+ROUTER_URL = 'http://127.0.0.1:17842/v1'
+DEFAULT_NATIVE_BASE = 'https://chatgpt.com/backend-api/codex'
+RUNTIME_FILES = {
+    'router.cjs': Path('src/router.cjs'),
+    'catalog.cjs': Path('src/catalog.cjs'),
+    'multimodal.cjs': Path('src/multimodal.cjs'),
+}
+if sys.platform == 'win32':
+    RUNTIME_FILES['windows_service.py'] = Path('windows_service.py')
+VERSION = '0.1.5'
+MISSING = object()
 
 def write_json(p, value):
     p.write_text(json.dumps(value, indent=2), encoding='utf-8')
@@ -84,30 +94,143 @@ def restore_setting(text, change):
             return ''.join(lines)
     raise RuntimeError('Managed setting is missing: ' + change['key'])
 
+def parse_literal(value):
+    return tomllib.loads('value = ' + value)['value']
+
+def get_setting(text, section, key):
+    value = tomllib.loads(text)
+    if section:
+        for part in section.split('.'):
+            if not isinstance(value, dict) or part not in value:
+                return MISSING
+            value = value[part]
+    if not isinstance(value, dict) or key not in value:
+        return MISSING
+    return value[key]
+
+def ensure_setting(text, section, key, value):
+    expected = parse_literal(value)
+    if get_setting(text, section, key) == expected:
+        return text, None
+    return edit_setting(text, section, key, value)
+
+def remove_setting(text, section, key):
+    lines = text.splitlines(keepends=True)
+    active = ''
+    section_start = None
+    for i, line in enumerate(lines):
+        match = re.match(r'^\s*\[([^\]]+)\]', line)
+        if match:
+            active = match[1]
+            section_start = i if active == section else None
+        if active == section and re.match(r'^\s*' + re.escape(key) + r'\s*=', line):
+            del lines[i]
+            if section and section_start is not None:
+                section_end = len(lines)
+                for j in range(section_start + 1, len(lines)):
+                    if re.match(r'^\s*\[', lines[j]):
+                        section_end = j
+                        break
+                body = lines[section_start + 1:section_end]
+                if all(not line.strip() or line.lstrip().startswith('#') for line in body):
+                    del lines[section_start:section_end]
+                    if section_start < len(lines) and not lines[section_start].strip():
+                        del lines[section_start]
+            return ''.join(lines)
+    return text
+
+def direct_router_url(value):
+    if not isinstance(value, str):
+        return False
+    try:
+        route = urllib.parse.urlsplit(value)
+        return route.hostname in ('127.0.0.1', 'localhost', '::1') and route.port == 17842 and route.path.rstrip('/') == '/v1'
+    except ValueError:
+        return False
+
+def route_contains_router(value):
+    if not isinstance(value, str):
+        return False
+    decoded = value
+    for _ in range(3):
+        next_value = urllib.parse.unquote(decoded)
+        if next_value == decoded:
+            break
+        decoded = next_value
+    pattern = r'https?://(?:127\.0\.0\.1|localhost|\[::1\]):17842/v1(?:[/?#]|$)'
+    return bool(re.search(pattern, decoded, re.IGNORECASE))
+
+def route_through_plugin(route):
+    """Put the router inside an existing path-style plugin wrapper."""
+    if direct_router_url(route):
+        raise RuntimeError('The router cannot be its own native upstream; restore the original route first')
+    if route_contains_router(route):
+        return route
+    raw_targets = list(re.finditer(r'https?://', route, re.IGNORECASE))
+    if len(raw_targets) > 1:
+        return route[:raw_targets[-1].start()] + ROUTER_URL
+    encoded_targets = list(re.finditer(r'https?%3A%2F%2F', route, re.IGNORECASE))
+    if encoded_targets:
+        return route[:encoded_targets[-1].start()] + urllib.parse.quote(ROUTER_URL, safe='')
+    return ROUTER_URL
+
+def route_without_router(route, native_base):
+    """Remove only the router hop while retaining an installed plugin wrapper."""
+    if not route_contains_router(route):
+        return route
+    if direct_router_url(route):
+        return native_base
+    if ROUTER_URL in route:
+        prefix = route[:route.index(ROUTER_URL)]
+        return native_base if native_base.startswith(prefix) else prefix + native_base
+    encoded_router = urllib.parse.quote(ROUTER_URL, safe='')
+    if encoded_router in route:
+        prefix = route[:route.index(encoded_router)]
+        encoded_native = urllib.parse.quote(native_base, safe='')
+        return native_base if encoded_native.startswith(prefix) else prefix + encoded_native
+    return native_base
+
 def ps_quote(s):
     return "'" + str(s).replace("'", "''") + "'"
 
 def configure_gateway(original):
     data = tomllib.loads(original)
-    upstream = urllib.parse.urlsplit(data.get('openai_base_url','https://chatgpt.com/backend-api/codex'))
-    if upstream.hostname in ('127.0.0.1','localhost','::1') and upstream.port == 17842:
+    current_route = data.get('openai_base_url', DEFAULT_NATIVE_BASE)
+    provider = data.get('model_providers', {}).get('cmdc-codex')
+    if direct_router_url(current_route):
         raise RuntimeError('The router cannot be its own native upstream; restore the original route first')
-    if data.get('model_provider', 'openai') != 'openai' or data.get('model_catalog_json'):
+    active = route_contains_router(current_route)
+    if data.get('model_catalog_json'):
         raise RuntimeError('Restore native provider/catalog first; existing custom configuration is preserved')
-    if 'cmdc-codex' in data.get('model_providers', {}):
-        raise RuntimeError('Provider cmdc-codex already exists; refusing to overwrite it')
-    text, provider = edit_setting(original, '', 'model_provider', json.dumps('cmdc-codex'))
-    changes = [provider]
-    # Existing conversations retain provider=openai when the global provider changes.
-    text, legacy_route = edit_setting(text, '', 'openai_base_url', json.dumps('http://127.0.0.1:17842/v1'))
-    changes.append(legacy_route)
-    for key, value in {'name':'CommandCode + native Codex', 'base_url':'http://127.0.0.1:17842/v1',
-                       'wire_api':'responses', 'requires_openai_auth':True, 'supports_websockets':False}.items():
-        text, change = edit_setting(text, 'model_providers.cmdc-codex', key, json.dumps(value))
+    if active:
+        if data.get('model_provider') != 'cmdc-codex':
+            raise RuntimeError('The active plugin route belongs to a different provider; refusing to overwrite it')
+        frontdoor = current_route
+    else:
+        if data.get('model_provider', 'openai') not in ('openai', 'cmdc-codex'):
+            raise RuntimeError('Restore native provider/catalog first; existing custom configuration is preserved')
+        if provider is not None and data.get('model_provider') != 'cmdc-codex':
+            raise RuntimeError('Provider cmdc-codex already exists; refusing to overwrite it')
+        if provider is not None and not route_contains_router(provider.get('base_url', '')):
+            raise RuntimeError('Provider cmdc-codex is not owned by this route; refusing to overwrite it')
+        frontdoor = route_through_plugin(current_route)
+    changes = []
+    text, change = ensure_setting(original, '', 'model_provider', json.dumps('cmdc-codex'))
+    if change:
         changes.append(change)
+    # Existing conversations retain provider=openai when the global provider changes.
+    text, legacy_route = ensure_setting(text, '', 'openai_base_url', json.dumps(frontdoor))
+    if legacy_route:
+        changes.append(legacy_route)
+    for key, value in {'name':'CommandCode + native Codex', 'base_url':frontdoor,
+                       'wire_api':'responses', 'requires_openai_auth':True, 'supports_websockets':False}.items():
+        text, change = ensure_setting(text, 'model_providers.cmdc-codex', key, json.dumps(value))
+        if change:
+            changes.append(change)
     efforts = data.get('desktop',{}).get('enabled-reasoning-efforts',['low','medium','high','xhigh','max','ultra'])
-    text, effort = edit_setting(text, 'desktop', 'enabled-reasoning-efforts', json.dumps(list(dict.fromkeys(['none']+efforts))))
-    changes.append(effort)
+    text, effort = ensure_setting(text, 'desktop', 'enabled-reasoning-efforts', json.dumps(list(dict.fromkeys(['none']+efforts))))
+    if effort:
+        changes.append(effort)
     tomllib.loads(text)
     return text, changes
 
@@ -200,12 +323,37 @@ def service(install, root, node):
             unit.unlink()
             subprocess.run(['systemctl','--user','daemon-reload'], check=True)
 
-def install(no_service=False):
-    if (ROOT / 'install.json').exists():
-        raise RuntimeError('Already installed; uninstall safely before reinstalling')
+def require_node():
     node = shutil.which('node')
     if not node or int(subprocess.check_output([node,'-p','process.versions.node.split(".")[0]'], text=True)) < 24:
         raise RuntimeError('Node.js 24+ is required (zstd support)')
+    return node
+
+def wait_for_router(attempts=30):
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen('http://127.0.0.1:17842/health', timeout=2) as response:
+                health = json.load(response)
+            if health.get('service') != 'codex-commandcode-router-v1':
+                raise RuntimeError('Router port belongs to another service')
+            return
+        except OSError:
+            if attempt == attempts - 1:
+                raise RuntimeError('Router did not start; config remains unchanged')
+            time.sleep(0.5)
+
+def config_is_installed(text):
+    data = tomllib.loads(text)
+    provider = data.get('model_providers', {}).get('cmdc-codex', {})
+    return (data.get('model_provider') == 'cmdc-codex'
+            and route_contains_router(data.get('openai_base_url', ''))
+            and route_contains_router(provider.get('base_url', '')))
+
+def install(no_service=False):
+    if (ROOT / 'install.json').exists():
+        print('Existing installation detected; upgrading owned runtime without changing Codex plugin configuration.')
+        return upgrade()
+    node = require_node()
     original = CONFIG.read_text(encoding='utf-8-sig') if CONFIG.exists() else ''
     data = tomllib.loads(original)
     text, changes = configure_gateway(original)
@@ -240,38 +388,23 @@ def install(no_service=False):
         if sys.platform == 'win32':
             subprocess.run(['icacls', str(own_key), '/inheritance:r', '/grant:r', getpass.getuser()+':F'],check=True,stdout=subprocess.DEVNULL)
     files = []
-    for name in ['router.cjs','catalog.cjs','multimodal.cjs']:
+    for name in RUNTIME_FILES:
         target = ROOT / name
         if target.exists():
             raise RuntimeError('Install file already exists: ' + str(target))
-        shutil.copyfile(BASE / 'src' / name, target)
+        shutil.copyfile(BASE / RUNTIME_FILES[name], target)
         files.append(name)
-    if sys.platform == 'win32':
-        if (ROOT / 'windows_service.py').exists():
-            raise RuntimeError('Install file already exists: ' + str(ROOT / 'windows_service.py'))
-        shutil.copyfile(BASE / 'windows_service.py', ROOT / 'windows_service.py')
-        files.append('windows_service.py')
-    settings = {'port':17842,'nativeBase':data.get('openai_base_url','https://chatgpt.com/backend-api/codex'),'keyFile':str(own_key)}
+    settings = {'port':17842,'nativeBase':data.get('openai_base_url',DEFAULT_NATIVE_BASE),'keyFile':str(own_key),'version':VERSION}
     write_json(ROOT / 'settings.json', settings)
     (ROOT / 'config.backup.toml').write_text(original,encoding='utf-8')
-    journal = {'root':str(ROOT.resolve()),'node':node,'no_service':no_service,'changes':changes,'files':files,'owns_key':should_store_key,'status':'prepared'}
+    journal = {'root':str(ROOT.resolve()),'node':node,'no_service':no_service,'changes':changes,'files':files,'owns_key':should_store_key,'status':'prepared','version':VERSION}
     if sys.platform == 'win32':
         journal['pythonw'] = str(Path(sys.executable).with_name('pythonw.exe'))
     write_json(ROOT / 'install.json', journal)
     try:
         if not no_service:
             service(True, ROOT, node)
-            for attempt in range(20):
-                try:
-                    with urllib.request.urlopen('http://127.0.0.1:17842/health', timeout=2) as response:
-                        health=json.load(response)
-                    if health.get('service')!='codex-commandcode-router-v1':
-                        raise RuntimeError('Router port belongs to another service')
-                    break
-                except OSError:
-                    if attempt==19:
-                        raise RuntimeError('Router did not start; config remains unchanged')
-                    time.sleep(0.5)
+            wait_for_router()
         write_config(text)
         journal['status']='installed'
         write_json(ROOT / 'install.json',journal)
@@ -310,6 +443,70 @@ def verify_gateway():
     if not external or len(external) == len(models):
         raise RuntimeError('Native and CommandCode catalogs must both be available before activation')
 
+def upgrade():
+    """Update owned runtime files without rewriting the user's plugin route."""
+    journal_path = ROOT / 'install.json'
+    if not journal_path.exists():
+        raise RuntimeError('No existing installation was found')
+    journal = json.loads(journal_path.read_text(encoding='utf-8-sig'))
+    if ROOT.is_symlink() or ROOT.resolve() != Path(journal['root']):
+        raise RuntimeError('Install root ownership changed')
+    if journal.get('status', 'installed') != 'installed':
+        raise RuntimeError('Installation is not active; finish recovery or uninstall first')
+    original = CONFIG.read_text(encoding='utf-8-sig') if CONFIG.exists() else ''
+    if not config_is_installed(original):
+        raise RuntimeError('Active cmdc-codex route was not found; run activate before upgrading')
+    settings_path = ROOT / 'settings.json'
+    if not settings_path.exists():
+        raise RuntimeError('Router settings are missing; reinstall is required')
+    previous_settings = settings_path.read_bytes()
+    node = require_node()
+    files = list(RUNTIME_FILES)
+    previous_files = {}
+    for name in files:
+        target = ROOT / name
+        previous_files[name] = target.read_bytes() if target.exists() else None
+    previous_journal = dict(journal)
+    updated = {**journal, 'node': node, 'files': files, 'version': VERSION}
+    if sys.platform == 'win32' and not journal.get('pythonw'):
+        updated['pythonw'] = str(Path(sys.executable).with_name('pythonw.exe'))
+    stopped = False
+    try:
+        for name in files:
+            target = ROOT / name
+            temporary = target.with_name(target.name + '.new')
+            shutil.copyfile(BASE / RUNTIME_FILES[name], temporary)
+            os.replace(temporary, target)
+        settings = json.loads(settings_path.read_text(encoding='utf-8-sig'))
+        settings['version'] = VERSION
+        write_json(settings_path, settings)
+        write_json(journal_path, updated)
+        if not journal.get('no_service', False):
+            service(False, ROOT, previous_journal.get('node', node))
+            stopped = True
+            service(True, ROOT, node)
+            wait_for_router()
+    except Exception:
+        for name, content in previous_files.items():
+            target = ROOT / name
+            if content is None:
+                target.unlink(missing_ok=True)
+            else:
+                target.write_bytes(content)
+        settings_path.write_bytes(previous_settings)
+        write_json(journal_path, previous_journal)
+        if stopped and not previous_journal.get('no_service', False):
+            try:
+                service(False, ROOT, previous_journal.get('node', node))
+            except Exception:
+                pass
+            try:
+                service(True, ROOT, previous_journal.get('node', node))
+            except Exception:
+                pass
+        raise
+    print('Upgraded cmdc-codex runtime; Codex and plugin route configuration was left unchanged.')
+
 def activate():
     """Recover an existing installation after a manually removed routing config."""
     journal_path = ROOT / 'install.json'
@@ -317,11 +514,16 @@ def activate():
     if ROOT.is_symlink() or ROOT.resolve() != Path(journal['root']):
         raise RuntimeError('Install root ownership changed')
     original = CONFIG.read_text(encoding='utf-8-sig') if CONFIG.exists() else ''
-    text, changes = configure_gateway(original)
     data = tomllib.loads(original)
     settings = json.loads((ROOT/'settings.json').read_text(encoding='utf-8-sig'))
-    if settings['nativeBase'] != data.get('openai_base_url','https://chatgpt.com/backend-api/codex'):
-        raise RuntimeError('Native upstream changed; review the existing route before recovery')
+    current_route = data.get('openai_base_url', DEFAULT_NATIVE_BASE)
+    native_base = settings.get('nativeBase', DEFAULT_NATIVE_BASE)
+    if route_contains_router(current_route):
+        text, changes = configure_gateway(original)
+    else:
+        if current_route != native_base and native_base not in current_route:
+            raise RuntimeError('Native upstream changed; review the existing route before recovery')
+        text, changes = configure_gateway(original)
     verify_gateway()
     # Record the current user config as the recovery baseline, rather than resurrecting an old backup.
     backup = ROOT / 'config.backup.toml'
@@ -330,7 +532,8 @@ def activate():
     try:
         backup.write_text(original,encoding='utf-8')
         write_json(journal_path,updated)
-        write_config(text)
+        if text != original:
+            write_config(text)
     except Exception:
         write_config(original)
         backup.write_text(previous_backup,encoding='utf-8')
@@ -338,14 +541,37 @@ def activate():
         raise
     print('Gateway activated after native and CommandCode catalog checks. Restart Codex Desktop to load its new provider.')
 
+def restore_managed_change(text, change, native_base):
+    section = change['section']
+    key = change['key']
+    current = get_setting(text, section, key)
+    if current is MISSING:
+        return text
+    if not section and key == 'openai_base_url' and route_contains_router(current):
+        if direct_router_url(current):
+            if change['before'] is None:
+                return remove_setting(text, section, key)
+            restored = tomllib.loads(change['before'])[key]
+            return ensure_setting(text, section, key, json.dumps(restored))[0]
+        return ensure_setting(text, section, key, json.dumps(route_without_router(current, native_base)))[0]
+    if section and key == 'base_url' and route_contains_router(current):
+        return remove_setting(text, section, key)
+    if current != tomllib.loads(change['after'])[key]:
+        return text
+    if change['before'] is None:
+        return remove_setting(text, section, key)
+    restored = tomllib.loads(change['before'])[key]
+    return ensure_setting(text, section, key, json.dumps(restored))[0]
+
 def uninstall():
     journal = json.loads((ROOT / 'install.json').read_text(encoding='utf-8'))
     if ROOT.is_symlink() or ROOT.resolve() != Path(journal['root']):
         raise RuntimeError('Install root ownership changed')
     text = CONFIG.read_text(encoding='utf-8')
     if journal.get('status','installed')=='installed':
+        settings = json.loads((ROOT/'settings.json').read_text(encoding='utf-8-sig'))
         for change in reversed(journal['changes']):
-            text = restore_setting(text, change)
+            text = restore_managed_change(text, change, settings.get('nativeBase', DEFAULT_NATIVE_BASE))
     tomllib.loads(text)
     write_config(text)
     journal['status']='config_restored'
@@ -369,11 +595,13 @@ def uninstall():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['install','activate','uninstall','status','refresh'])
+    parser.add_argument('command', choices=['install','upgrade','activate','uninstall','status','refresh'])
     parser.add_argument('--no-service', action='store_true', help='Configure only; for tests or a separately supervised service')
     args = parser.parse_args()
     if args.command == 'install':
         install(args.no_service)
+    elif args.command == 'upgrade':
+        upgrade()
     elif args.command == 'activate':
         activate()
     elif args.command == 'uninstall':
